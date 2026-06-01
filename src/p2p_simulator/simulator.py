@@ -236,13 +236,10 @@ class P2PSimulator:
         # self._publish_to_kafka(channel, event.get("user_id", ""), payload)
 
     def _publish_to_redis(self, channel: str, payload: str):
-        """
-        TODO : publier payload dans le channel Redis via pub/sub.
-        Utiliser self.redis.publish(channel, payload)
-        Gérer l'exception si Redis est indisponible (log + skip).
-        """
         try:
             self.redis.publish(channel, payload)
+            self.redis.lpush(f"queue:{channel}", payload)
+            self.redis.ltrim(f"queue:{channel}", 0, 9999)
         except Exception as e:
             logger.error(f"Redis indisponible, événement perdu : {e}")
 
