@@ -206,15 +206,14 @@ with DAG(
             try:
                 cur.execute("""
                     INSERT INTO listening_events
-                        (id, user_id, track_id, source_peer, timestamp,
-                         duration_ms, device_type, geo_country, completed, event_source)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (id, user_id, track_id, timestamp,
+                        duration_ms, device_type, geo_country, completed, event_source)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO NOTHING
                 """, (
                     event.get("event_id"),
                     event.get("user_id"),
                     event.get("track_id"),
-                    event.get("source_peer"),
                     event.get("timestamp"),
                     event.get("duration_ms"),
                     event.get("device_type"),
