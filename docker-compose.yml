@@ -113,10 +113,10 @@ services:
     <<: *airflow-common
     command: scheduler
     healthcheck:
-      test: ["CMD", "airflow", "jobs", "check", "--job-type", "SchedulerJob", "--hostname", "$${HOSTNAME}"]
-      interval: 30s
-      retries: 5
-      start_period: 30s
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$(hostname)\""]
+      interval: 60s
+      retries: 10
+      start_period: 60s
 
   airflow-worker:
     <<: *airflow-common
