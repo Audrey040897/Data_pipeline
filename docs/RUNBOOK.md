@@ -31,6 +31,18 @@ docker compose restart airflow-worker
 
 **Cause probable :** → À compléter par votre groupe après avoir rencontré cet incident
 
+- Airflow scheduler bloqué au démarrage, pas de DAGs disponibles.
+
+**Cause:** PostgreSQL pas prêt + healthcheck mal configuré  
+**Solution:** Augmenter start_period à 60s, nettoyer les jobs bloqués
+
+## Vérifications finales
+- [x] PostgreSQL UP et 11 tables créées
+- [x] Redis UP (PONG)
+- [x] MinIO UP avec 3 buckets
+- [x] Airflow UI accessible (admin/admin)
+- [x] 4 tests pytest PASSED
+
 ---
 
 ### INC-02 — PostgreSQL : `too many connections`
