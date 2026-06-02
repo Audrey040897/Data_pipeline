@@ -236,12 +236,15 @@ class P2PSimulator:
         # self._publish_to_kafka(channel, event.get("user_id", ""), payload)
 
     def _publish_to_redis(self, channel: str, payload: str):
+        """Publie dans les listes Redis consommées par Airflow."""
         try:
-            self.redis.publish(channel, payload)
-            self.redis.lpush(f"queue:{channel}", payload)
-            self.redis.ltrim(f"queue:{channel}", 0, 9999)
+            # On utilise le préfixe 'queue:' pour correspondre à ton DAG
+            queue_name = f"queue:{channel}"
+            self.redis.lpush(queue_name, payload)
+            # Optionnel : limiter la taille de la file pour éviter de saturer Redis
+            self.redis.ltrim(queue_name, 0, 9999)
         except Exception as e:
-            logger.error(f"Redis indisponible, événement perdu : {e}")
+            logger.error(f"Erreur Redis sur {channel}: {e}")
 
     # def _publish_to_kafka(self, topic: str, key: str, payload: str):
     #     """
