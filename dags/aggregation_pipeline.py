@@ -164,7 +164,7 @@ with DAG(
         
         # 1. Calcul du Taux de cache_hit et répartition générale
         source_query = """
-            SELECT event_source, COUNT(*), COUNT(DISTINCT user_id), COUNT(DISTINCT source_peer)
+            SELECT event_source, COUNT(*), COUNT(DISTINCT user_id), COUNT(DISTINCT source_peer_id)
             FROM listening_events
             WHERE DATE(timestamp) = %s
             GROUP BY event_source;
