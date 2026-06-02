@@ -1,0 +1,16 @@
+              List of relations
+ Schema |        Name         | Type  |  Owner  
+--------+---------------------+-------+---------
+ public | albums              | table | airflow
+ public | artist_stats        | table | airflow
+ public | artists             | table | airflow
+ public | daily_streams       | table | airflow
+ public | dead_letter_events  | table | airflow
+ public | federated_catalog   | table | airflow
+ public | fraud_detections    | table | airflow
+ public | genres              | table | airflow
+ public | listening_events    | table | airflow
+ public | peers               | table | airflow
+ public | realtime_top_tracks | table | airflow
+ public | recommendations     | table | airflow
+ public | tracks              | table | airflow
