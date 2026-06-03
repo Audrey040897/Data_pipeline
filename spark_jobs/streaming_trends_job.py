@@ -1,12 +1,16 @@
 """
-Spark Job : streaming_trends_job
-==================================
-Consomme le topic Kafka `listening_events` et produit en continu
-les tendances musicales temps réel.
+Spark Job : streaming_trends_job (avec Watermarking)
+=====================================================
+Consomme le topic Kafka `listening_events` avec watermarking et gestion des late events.
 
 Outputs :
     - PostgreSQL → table `realtime_top_tracks` (top 10 par fenêtre de 5 min)
     - Redis      → clé `top_tracks:live` (top genres par sliding window)
+    - Kafka      → topic `late_listening_events` (événements tardifs)
+
+Watermarking :
+    - Permet à Spark d'accepter les événements jusqu'à 10 minutes après la fermeture d'une fenêtre
+    - Les événements au-delà du watermark sont routés vers late_listening_events
 
 Lancement :
     spark-submit \
@@ -30,6 +34,7 @@ from pyspark.sql.types import (
 
 KAFKA_BOOTSTRAP  = os.getenv("KAFKA_BOOTSTRAP",  "kafka-1:9092")
 KAFKA_TOPIC      = "listening_events"
+KAFKA_LATE_TOPIC = "late_listening_events"
 CHECKPOINT_PATH  = "s3a://spotify-checkpoints/streaming_trends"
 POSTGRES_URL     = os.getenv("SPOTIFY_POSTGRES_URL",
                              "jdbc:postgresql://postgres:5432/spotify")
@@ -38,6 +43,9 @@ POSTGRES_PROPS   = {
     "password": "spotify",
     "driver": "org.postgresql.Driver",
 }
+
+# Watermark config
+WATERMARK_DELAY = "10 minutes"  # Attendre 10 min après la fenêtre pour les late events
 
 # ─────────────────────────────────────────────────────────────
 # SCHÉMA DES ÉVÉNEMENTS D'ÉCOUTE
@@ -48,7 +56,7 @@ LISTENING_EVENT_SCHEMA = StructType([
     StructField("user_id",     StringType(),    False),
     StructField("track_id",    StringType(),    False),
     StructField("source_peer", StringType(),    True),
-    StructField("timestamp",   StringType(),    False),  # ISO 8601 → à caster en Timestamp
+    StructField("timestamp",   StringType(),    False),
     StructField("duration_ms", IntegerType(),   True),
     StructField("device_type", StringType(),    True),
     StructField("geo_country", StringType(),    True),
@@ -67,7 +75,7 @@ def create_spark_session() -> SparkSession:
     """
     return (
         SparkSession.builder
-        .appName("SPOTIFY-streaming-trends")
+        .appName("SPOTIFY-streaming-trends-watermarking")
         .config("spark.sql.shuffle.partitions", "6")
         .config("spark.streaming.stopGracefullyOnShutdown", "true")
         # MinIO / S3A
@@ -88,7 +96,6 @@ def create_spark_session() -> SparkSession:
 def read_kafka_stream(spark: SparkSession):
     """
     Lit le topic Kafka `listening_events` en streaming.
-
     Retourne un DataFrame streaming avec colonnes typées et parsées.
     """
     # Lire depuis Kafka
@@ -97,7 +104,7 @@ def read_kafka_stream(spark: SparkSession):
         .format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", KAFKA_TOPIC)
-        .option("startingOffsets", "latest")  # ou "earliest" pour déboguer
+        .option("startingOffsets", "latest")
         .load()
     )
 
@@ -127,21 +134,98 @@ def read_kafka_stream(spark: SparkSession):
 
 
 # ─────────────────────────────────────────────────────────────
-# AGRÉGATIONS STREAMING
+# WATERMARKING ET SÉPARATION DES ÉVÉNEMENTS
+# ─────────────────────────────────────────────────────────────
+
+def apply_watermark(events_df):
+    """
+    Applique le watermark sur les événements.
+    
+    Cela dit à Spark : "Accepte les événements jusqu'à 10 minutes après 
+    la fermeture d'une fenêtre. Au-delà, c'est un late event."
+    """
+    watermarked_df = (
+        events_df
+        .withWatermark("event_time", WATERMARK_DELAY)
+    )
+    
+    print(f"Watermark appliqué : {WATERMARK_DELAY}")
+    return watermarked_df
+
+
+def route_late_events(events_df, spark: SparkSession):
+    """
+    Route les événements tardifs vers le topic Kafka `late_listening_events`.
+    
+    Les événements "late" sont ceux qui arrivent après le watermark.
+    On les envoie vers Kafka pour qu'Airflow les retraite plus tard.
+    """
+    
+    def write_late_events_to_kafka(batch_df, batch_id):
+        """
+        Écrit les événements tardifs dans Kafka.
+        """
+        if batch_df.count() == 0:
+            print(f"Batch {batch_id} : pas de late events")
+            return
+        
+        # Sérialiser en JSON
+        json_df = (
+            batch_df
+            .select(
+                F.to_json(
+                    F.struct("*")
+                ).alias("value")
+            )
+        )
+        
+        # Écrire dans Kafka
+        try:
+            json_df.write \
+                .format("kafka") \
+                .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP) \
+                .option("topic", KAFKA_LATE_TOPIC) \
+                .option("kafka.compression.type", "snappy") \
+                .option("checkpointLocation", f"{CHECKPOINT_PATH}/late_events") \
+                .mode("append") \
+                .save()
+            
+            print(f"Batch {batch_id} : {batch_df.count()} late events routés vers {KAFKA_LATE_TOPIC}")
+        except Exception as e:
+            print(f"Erreur écriture late events Kafka : {e}")
+    
+    # Utiliser foreachBatch pour écrire les late events
+    query = (
+        events_df
+        .writeStream
+        .foreachBatch(write_late_events_to_kafka)
+        .option("checkpointLocation", f"{CHECKPOINT_PATH}/late_events_routing")
+        .outputMode("append")
+        .start()
+    )
+    
+    return query
+
+
+# ─────────────────────────────────────────────────────────────
+# AGRÉGATIONS STREAMING (avec watermark)
 # ─────────────────────────────────────────────────────────────
 
 def compute_top_tracks_tumbling(events_df):
     """
     Top 10 des tracks par tumbling window de 5 minutes.
     
-    Fenêtre tumbling = pas de chevauchement, on reset toutes les 5 min.
-    Écriture dans PostgreSQL via foreachBatch + JDBC.
+    Le watermark permet à cette fenêtre de rester ouverte 10 minutes
+    de plus pour accepter les late events.
     """
+    
+    # Appliquer le watermark d'abord
+    watermarked_df = apply_watermark(events_df)
     
     # Agrégation par fenêtre de 5 min + track_id
     windowed_df = (
-        events_df
-        .filter(F.col("completed") == True)  # Seulement les écoutes complètes
+        watermarked_df
+        .filter(F.col("completed") == True)
         .groupBy(
             F.window(F.col("event_time"), "5 minutes"),
             F.col("track_id")
@@ -165,7 +249,7 @@ def compute_top_tracks_tumbling(events_df):
         Écrit un batch de résultats dans PostgreSQL.
         """
         if batch_df.count() == 0:
-            print(f"Batch {batch_id} : vide, rien à écrire")
+            print(f"Batch {batch_id} : vide")
             return
 
         batch_df.write \
@@ -176,7 +260,7 @@ def compute_top_tracks_tumbling(events_df):
             .options(**POSTGRES_PROPS) \
             .save()
 
-        print(f"Batch {batch_id} : {batch_df.count()} lignes écrites dans realtime_top_tracks")
+        print(f"Batch {batch_id} : {batch_df.count()} lignes → realtime_top_tracks")
 
     # Écriture streaming avec foreachBatch
     query = (
@@ -193,19 +277,19 @@ def compute_top_tracks_tumbling(events_df):
 
 def compute_genre_listeners_sliding(events_df, catalog_df):
     """
-    Listeners uniques par genre en sliding window (15 min glissant toutes les 5 min).
-    
-    Sliding window = fenêtres qui se chevauchent.
-    Jointure stream-static avec le catalogue pour récupérer les genres.
-    Écriture dans Redis via foreachBatch.
+    Listeners uniques par genre en sliding window (15 min / 5 min).
+    Le watermark permet de capturer les late events ici aussi.
     """
     
-    # Jointure stream-static : events avec catalogue pour ajouter le genre
+    # Appliquer le watermark
+    watermarked_df = apply_watermark(events_df)
+    
+    # Jointure stream-static
     enriched_df = (
-        events_df
+        watermarked_df
         .join(
             catalog_df.select("id", "genre"),
-            events_df.track_id == catalog_df.id,
+            watermarked_df.track_id == catalog_df.id,
             "left"
         )
         .filter(F.col("completed") == True)
@@ -234,46 +318,41 @@ def compute_genre_listeners_sliding(events_df, catalog_df):
     def write_to_redis(batch_df, batch_id):
         """
         Écrit les résultats dans Redis.
-        Clé : "genre_listeners:live" avec format JSON.
         """
         try:
             import redis
         except ImportError:
-            print("redis-py non installé, installation recommandée : pip install redis")
+            print("redis-py non installé")
             return
 
         if batch_df.count() == 0:
-            print(f"Batch {batch_id} : vide, rien à écrire en Redis")
+            print(f"Batch {batch_id} : vide")
             return
 
-        # Convertir en dict pour Redis
         records = batch_df.collect()
         genre_stats = {}
 
         for row in records:
             genre = row["genre"] or "unknown"
             listeners = row["unique_listeners"]
-            
-            # Garder seulement le dernier (on overwrite)
             genre_stats[genre] = {
                 "unique_listeners": listeners,
                 "window_start": str(row["window_start"]),
                 "window_end": str(row["window_end"])
             }
 
-        # Écrire dans Redis
         try:
             r = redis.Redis(host="redis", port=6379, db=1, decode_responses=True)
             r.setex(
                 "genre_listeners:live",
-                3600,  # TTL 1h
+                3600,
                 json.dumps(genre_stats)
             )
-            print(f"Batch {batch_id} : {len(genre_stats)} genres écrits dans Redis")
+            print(f"Batch {batch_id} : {len(genre_stats)} genres → Redis")
         except Exception as e:
-            print(f"Erreur écriture Redis : {e}")
+            print(f"Erreur Redis : {e}")
 
-    # Écriture streaming avec foreachBatch
+    # Écriture streaming
     query = (
         windowed_df
         .writeStream
@@ -294,14 +373,22 @@ def main():
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
 
-    print("Démarrage streaming_trends_job...")
+    print("=" * 60)
+    print("Démarrage streaming_trends_job (avec Watermarking)")
+    print("=" * 60)
     print(f"Kafka : {KAFKA_BOOTSTRAP} → topic : {KAFKA_TOPIC}")
+    print(f"Late events topic : {KAFKA_LATE_TOPIC}")
+    print(f"Watermark delay : {WATERMARK_DELAY}")
     print(f"Checkpoint : {CHECKPOINT_PATH}")
+    print("=" * 60)
 
     # Lecture Kafka
     events_df = read_kafka_stream(spark)
 
-    # Chargement du catalogue (jointure statique)
+    # Route des late events (indépendant des agrégations)
+    query_late_events = route_late_events(events_df, spark)
+
+    # Chargement du catalogue
     try:
         catalog_df = spark.read \
             .format("jdbc") \
@@ -309,18 +396,21 @@ def main():
             .option("dbtable", "tracks") \
             .options(**POSTGRES_PROPS) \
             .load()
-        print("Catalogue chargé depuis PostgreSQL")
+        print("✅ Catalogue chargé depuis PostgreSQL")
     except Exception as e:
-        print(f"Erreur chargement catalogue : {e}")
+        print(f"❌ Erreur catalogue : {e}")
         catalog_df = None
 
-    # Agrégations
+    # Agrégations avec watermark
     query_top_tracks = compute_top_tracks_tumbling(events_df)
+    print("✅ Top tracks query lancée")
     
     if catalog_df is not None:
         query_genres = compute_genre_listeners_sliding(events_df, catalog_df)
+        print("✅ Genre listeners query lancée")
 
     # Attendre l'arrêt gracieux
+    print("\n🚀 Streaming en cours... (Ctrl+C pour arrêter)")
     spark.streams.awaitAnyTermination()
 
 
