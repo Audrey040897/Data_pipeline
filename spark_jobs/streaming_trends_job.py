@@ -96,20 +96,38 @@ def create_spark_session() -> SparkSession:
 
 def read_kafka_stream(spark: SparkSession):
     """
-    Lit le topic Kafka `listening_events` en streaming.
-
-    TODO :
-        1. Utiliser spark.readStream.format("kafka")
-        2. Configurer kafka.bootstrap.servers, subscribe, startingOffsets
-        3. Caster la colonne "value" (bytes) en string
-        4. Parser le JSON avec from_json() et LISTENING_EVENT_SCHEMA
-        5. Caster la colonne "timestamp" (string ISO) en TimestampType
-        6. Renommer en "event_time" pour les fenêtres temporelles
-
-    Returns:
-        DataFrame streaming avec colonnes typées
+    Lit le topic Kafka `listening_events` en streaming selon la doc officielle.
     """
-    raise NotImplementedError("TODO : implémenter read_kafka_stream()")
+    # 1. Lecture brute depuis Kafka
+    raw_stream_df = (
+        spark.readStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("subscribe", KAFKA_TOPIC)
+        .option("startingOffsets", "earliest")
+        # Exigence Issue #13 : isolation.level=read_committed
+        .option("kafka.isolation.level", "read_committed")
+        .load()
+    )
+
+    # 2. Désérialisation du JSON (on cast 'value' qui est en binaire vers string)
+    json_df = raw_stream_df.selectExpr("CAST(value AS STRING) as json_payload", "timestamp as kafka_time")
+
+    # 3. Parsing du JSON avec le schéma défini
+    # On garde json_payload pour le débug
+    events_df = json_df.select(
+        F.from_json(F.col("json_payload"), LISTENING_EVENT_SCHEMA).alias("data"),
+        F.col("json_payload")
+    ).select("data.*", "json_payload")
+
+    # 4. Conversion du timestamp (string ISO 8601) en vrai TimestampType
+    # On renomme en 'event_time' pour les calculs de fenêtres plus tard
+    final_df = events_df.withColumn(
+        "event_time", 
+        F.to_timestamp(F.col("timestamp"))
+    )
+
+    return final_df
 
 
 # ─────────────────────────────────────────────────────────────
@@ -118,18 +136,19 @@ def read_kafka_stream(spark: SparkSession):
 
 def compute_top_tracks_tumbling(events_df):
     """
-    Top 10 des tracks par tumbling window de 5 minutes.
-
-    TODO :
-        1. groupBy(window("event_time", "5 minutes"), "track_id")
-        2. agg(count("*").alias("stream_count"), countDistinct("user_id").alias("unique_listeners"))
-        3. Output mode : "update" (on met à jour au fur et à mesure)
-        4. Écrire dans PostgreSQL table realtime_top_tracks
-
-    Hint : pour écrire dans PostgreSQL depuis Spark Streaming,
-    utiliser foreachBatch() et df.write.jdbc() dans le batch.
+    Pour l'Issue #13 : simple affichage console pour valider la lecture.
     """
-    raise NotImplementedError("TODO : implémenter compute_top_tracks_tumbling()")
+    query = (
+        events_df.writeStream
+        .outputMode("append")
+        .format("console")
+        .option("truncate", "false")
+        # On configure le checkpoint sur MinIO comme demandé
+        .option("checkpointLocation", CHECKPOINT_PATH)
+        .trigger(processingTime="10 seconds") # Test du mode processingTime
+        .start()
+    )
+    return query
 
 
 def compute_genre_listeners_sliding(events_df, catalog_df):
