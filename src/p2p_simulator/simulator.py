@@ -27,7 +27,7 @@ from typing import Optional
 import redis
 
 # Phase 2 — décommenter quand Kafka est prêt
-# from confluent_kafka import Producer
+from confluent_kafka import Producer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +41,7 @@ logger = logging.getLogger("p2p_simulator")
 # ─────────────────────────────────────────────────────────────
 
 REDIS_URL = "redis://localhost:6379/1"
-KAFKA_BOOTSTRAP = "kafka-1:9092"       # Phase 2
+KAFKA_BOOTSTRAP = "localhost:9092"
 
 TOPICS = {
     "listening":   "listening_events",
@@ -92,12 +92,13 @@ class P2PSimulator:
         self.mode = mode
         self.running = True
         self.event_count = 0
+        self.active_peers = [str(uuid.uuid4()) for _ in range(n_peers)]
 
         # Connexion Redis
         self.redis = redis.from_url(REDIS_URL, decode_responses=True)
 
         # Phase 2 — Kafka producer
-        # self.kafka_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+        self.kafka_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP, 'acks': 'all', 'enable.idempotence': True})
 
         # Peers actifs simulés
         self.active_peers = [str(uuid.uuid4()) for _ in range(n_peers)]
@@ -233,7 +234,8 @@ class P2PSimulator:
 
         self._publish_to_redis(channel, payload)
         # Phase 2 — décommenter
-        # self._publish_to_kafka(channel, event.get("user_id", ""), payload)
+        
+        self._publish_to_kafka(channel, event.get("user_id", ""), payload)
 
     def _publish_to_redis(self, channel: str, payload: str):
         """Publie dans les listes Redis consommées par Airflow."""
@@ -246,14 +248,13 @@ class P2PSimulator:
         except Exception as e:
             logger.error(f"Erreur Redis sur {channel}: {e}")
 
-    # def _publish_to_kafka(self, topic: str, key: str, payload: str):
-    #     """
-    #     TODO Phase 2 : publier payload dans le topic Kafka.
-    #     - key     : utilisé pour le partitionnement (user_id ou peer_id)
-    #     - acks    : 'all' pour la durabilité
-    #     - Gérer le callback de confirmation (delivery_report)
-    #     """
-    #     raise NotImplementedError("TODO Phase 2 : implémenter _publish_to_kafka()")
+    def _publish_to_kafka(self, topic: str, key: str, payload: str):
+            def delivery_report(err, msg):
+                if err is not None:
+                    logger.error(f"Erreur Kafka: {err}")
+            
+            self.kafka_producer.produce(topic, key=key, value=payload, callback=delivery_report)
+            self.kafka_producer.poll(0)
 
     def _shutdown(self, signum, frame):
         logger.info(f"Arrêt du simulateur (signal {signum}) — {self.event_count} événements publiés")
