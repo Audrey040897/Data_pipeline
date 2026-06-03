@@ -40,14 +40,19 @@ LISTENING_EVENT_SCHEMA = StructType([
 
 def create_spark_session() -> SparkSession:
     """
-    Configure la session avec les paramètres S3A requis pour MinIO (Issue #13).
+    Configure la session avec les paramètres S3A requis pour MinIO (Issue #13)
+    et les paramètres réseau pour la Spark UI.
     """
     return (
         SparkSession.builder
         .appName("SPOTIFY-streaming-trends")
         .config("spark.sql.shuffle.partitions", "6")
         .config("spark.streaming.stopGracefullyOnShutdown", "true")
-        # --- CONFIGURATION MINIO / S3A ---
+        # CONFIGURATION RÉSEAU (UI)
+        #.config("spark.ui.port", "4040")
+        #.config("spark.driver.bindAddress", "0.0.0.0")
+        #.config("spark.driver.host", "localhost")
+        # CONFIGURATION MINIO / S3A
         .config("spark.hadoop.fs.s3a.endpoint",             "http://minio:9000")
         .config("spark.hadoop.fs.s3a.access.key",           "minioadmin")
         .config("spark.hadoop.fs.s3a.secret.key",           "minioadmin")
@@ -80,7 +85,7 @@ def read_kafka_stream(spark: SparkSession):
         F.from_json(F.col("value").cast("string"), LISTENING_EVENT_SCHEMA).alias("data")
     ).select("data.*")
 
-    # Ajout du Watermark de 10 min (Issue #15)
+    # Ajout du Watermark de 10 min (Livrable Issue #15)
     return events_df.withColumn(
         "event_time", 
         F.to_timestamp(F.col("timestamp"))
@@ -88,7 +93,7 @@ def read_kafka_stream(spark: SparkSession):
 
 def route_late_events(batch_df, batch_id):
     """
-    Routage des événements tardifs vers Kafka (Issue #15).
+    Routage des événements tardifs vers Kafka (Livrable Issue #15).
     """
     max_time_row = batch_df.select(F.max("event_time")).collect()
     
@@ -116,9 +121,9 @@ def route_late_events(batch_df, batch_id):
 
 def compute_top_tracks_tumbling(events_df):
     """
-    Issue #15 : Affichage console ET routage des late events via foreachBatch.
+    Validation Issue #15 : Affichage console ET routage via foreachBatch.
     """
-    # 1. Affichage console (Critère de validation visuelle)
+    # 1. Affichage console pour validation visuelle (Critère Issue #15)
     query_console = (
         events_df.writeStream
         .outputMode("append")
@@ -128,7 +133,7 @@ def compute_top_tracks_tumbling(events_df):
         .start()
     )
 
-    # 2. Routage vers Kafka topic 'late_listening_events'
+    # 2. Routage vers Kafka topic 'late_listening_events' (Livrable Issue #15)
     query_routing = (
         events_df.writeStream
         .foreachBatch(route_late_events)
