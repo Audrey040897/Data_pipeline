@@ -1,0 +1,3 @@
+/Users/lokohaudrey/Desktop/Data pipeline-streaming /Data_pipeline/env/lib/python3.13/site-packages/airflow/metrics/base_stats_logger.py:22 RemovedInAirflow3Warning: Timer and timing metrics publish in seconds were deprecated. It is enabled by default from Airflow 3 onwards. Enable timer_unit_consistency to publish all the timer and timing metrics in milliseconds.
+/Users/lokohaudrey/Desktop/Data pipeline-streaming /Data_pipeline/env/lib/python3.13/site-packages/airflow/triggers/base.py:27 RemovedInAirflow3Warning: Timer and timing metrics publish in seconds were deprecated. It is enabled by default from Airflow 3 onwards. Enable timer_unit_consistency to publish all the timer and timing metrics in milliseconds.
+✅ All tests passed!
