@@ -181,6 +181,8 @@ docker logs spark-master | grep "checkpoint"
 **Comportement observé (Spark) :** ...
 
 **Données perdues :** oui / non — détails : ...
+
+
 ## Issue #16 — Vérification exactly-once
 
 ### Objectif
