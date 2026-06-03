@@ -181,3 +181,28 @@ docker logs spark-master | grep "checkpoint"
 **Comportement observé (Spark) :** ...
 
 **Données perdues :** oui / non — détails : ...
+## Issue #16 — Vérification exactly-once
+
+### Objectif
+
+Vérifier que la chaîne Producteur Kafka → Spark Structured Streaming → PostgreSQL ne génère pas de doublons après un arrêt et redémarrage du job Spark.
+
+### Configuration attendue
+
+Producteur Kafka :
+
+- `enable_idempotence=True`
+- `acks='all'`
+- `transactional_id='p2p-simulator-1'`
+
+Consommateur Spark :
+
+- `kafka.isolation.level=read_committed`
+- checkpoint Spark conservé sur MinIO
+
+### Procédure de test
+
+1. Lancer le simulateur Kafka :
+
+```bash
+python -m src.p2p_simulator.simulator --kafka --peers 10 --rate 3
