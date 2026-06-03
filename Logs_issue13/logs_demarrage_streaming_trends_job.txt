@@ -1,0 +1,14 @@
+Démarrage streaming_trends_job...
+Kafka : kafka-1:9092 → topic : listening_events
+Checkpoint : s3a://spotify-checkpoints/streaming_trends
+26/06/03 07:27:20 WARN MetricsConfig: Cannot locate configuration: tried hadoop-metrics2-s3a-file-system.properties,hadoop-metrics2.properties
+26/06/03 07:27:21 WARN ResolveWriteToStream: spark.sql.adaptive.enabled is not supported in streaming DataFrames/Datasets and will be disabled.
+26/06/03 07:27:22 WARN AdminClientConfig: These configurations '[key.deserializer, value.deserializer, enable.auto.commit, max.poll.records, isolation.level, auto.offset.reset]' were supplied but are not used yet.
+-------------------------------------------
+Batch: 2
+-------------------------------------------
++----------+----------+--------+-----------+--------------------+-----------+-----------+-----------+---------+------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------+
+|event_id  |user_id   |track_id|source_peer|timestamp           |duration_ms|device_type|geo_country|completed|event_source|json_payload                                                                                                                                                                  |event_time         |
++----------+----------+--------+-----------+--------------------+-----------+-----------+-----------+---------+------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------+
+|final_test|student_ok|track_99|NULL       |2026-06-03T11:00:00Z|NULL       |web        |FR         |true     |NULL        |{"event_id": "final_test", "user_id": "student_ok", "track_id": "track_99", "timestamp": "2026-06-03T11:00:00Z", "device_type": "web", "geo_country": "FR", "completed": true}|2026-06-03 11:00:00|
++----------+----------+--------+-----------+--------------------+-----------+-----------+-----------+---------+------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------+
