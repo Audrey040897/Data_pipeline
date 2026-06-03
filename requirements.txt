@@ -9,7 +9,11 @@ faker==24.0.0
 boto3==1.34.0          # accès MinIO (S3-compatible)
 
 # ── Transformations
+<<<<<<< Updated upstream
 pandas>=2.2.1
+=======
+pandas>=2.2.0
+>>>>>>> Stashed changes
 pyarrow>=15.0.0        # lecture/écriture Parquet
 
 # ── Base de données
@@ -26,8 +30,8 @@ kafka-python==2.0.2    # alternative plus simple
 # pyspark==3.5.0
 
 # ── Machine Learning (recommandations)
-scikit-learn==1.4.0
-numpy==1.26.4
+scikit-learn>=1.4.0
+numpy>=1.26.4
 
 # ── Tests
 pytest==8.0.0

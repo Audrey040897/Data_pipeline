@@ -101,6 +101,9 @@ services:
   airflow-webserver:
     <<: *airflow-common
     command: webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
     ports:
       - "8080:8080"
     healthcheck:
@@ -112,6 +115,9 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$(hostname)\""]
       interval: 60s
@@ -121,6 +127,9 @@ services:
   airflow-worker:
     <<: *airflow-common
     command: celery worker
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
     environment:
       <<: *airflow-common-env
       DUMB_INIT_SETSID: "0"
@@ -128,6 +137,9 @@ services:
   airflow-triggerer:
     <<: *airflow-common
     command: triggerer
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
 
   airflow-init:
     <<: *airflow-common
