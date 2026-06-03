@@ -15,9 +15,16 @@ TODO :
 
 from datetime import datetime, timedelta
 
+import json
+import math
+from collections import defaultdict
+
+import redis
+
 from airflow import DAG
 from airflow.decorators import task
 from airflow.sensors.external_task import ExternalTaskSensor
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 DAG_DOC = """
 ## recommendation_pipeline
@@ -84,53 +91,225 @@ with DAG(
     def build_user_track_matrix(**context) -> dict:
         """
         Construit la matrice user × track des écoutes des 7 derniers jours.
-
-        TODO :
-            1. Requête SQL :
-               SELECT user_id, track_id, COUNT(*) as play_count
-               FROM listening_events
-               WHERE timestamp >= NOW() - INTERVAL '7 days'
-                 AND completed = TRUE
-               GROUP BY user_id, track_id
-            2. Construire un dict {user_id: {track_id: play_count}}
-            3. Ne garder que les utilisateurs avec >= 3 écoutes distinctes
-            4. Retourner la matrice + la liste des users actifs
-
-        Hint : pandas pivot_table peut aider pour construire la matrice.
         """
-        raise NotImplementedError("TODO : implémenter build_user_track_matrix()")
+
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+
+        sql = """
+            SELECT
+                user_id::text,
+                track_id::text,
+                COUNT(*) AS play_count
+            FROM listening_events
+            WHERE timestamp >= NOW() - INTERVAL '7 days'
+              AND completed = TRUE
+            GROUP BY user_id, track_id
+        """
+
+        rows = hook.get_records(sql)
+
+        matrix = defaultdict(dict)
+
+        for user_id, track_id, play_count in rows:
+            matrix[user_id][track_id] = int(play_count)
+
+        active_matrix = {
+            user_id: tracks
+            for user_id, tracks in matrix.items()
+            if len(tracks) >= 3
+        }
+
+        print(f"{len(active_matrix)} utilisateurs actifs trouvés.")
+
+        return {
+            "matrix": dict(active_matrix),
+            "users": list(active_matrix.keys())
+        }
 
     @task(task_id="compute_recommendations")
     def compute_recommendations(matrix_data: dict, **context) -> dict:
         """
         Calcule les recommandations par similarité cosinus.
-
-        TODO :
-            1. Convertir la matrice en numpy array ou DataFrame sparse
-            2. Calculer la similarité cosinus entre utilisateurs
-               (sklearn.metrics.pairwise.cosine_similarity)
-            3. Pour chaque user : trouver ses TOP_N voisins les plus similaires
-            4. Recommander les tracks que ses voisins ont aimés mais qu'il n'a pas écoutés
-            5. Retourner {user_id: [track_id_1, track_id_2, ...]} (top TOP_N_RECO)
-
-        Hint : scipy.sparse.csr_matrix pour gérer les grandes matrices efficacement.
+        Version custom sans scikit-learn.
         """
-        raise NotImplementedError("TODO : implémenter compute_recommendations()")
 
+        matrix = matrix_data.get("matrix", {})
+        users = matrix_data.get("users", [])
+
+        if not matrix or len(users) < 2:
+            print("Pas assez d'utilisateurs actifs pour générer des recommandations.")
+            return {}
+
+        all_tracks = sorted({
+            track_id
+            for user_tracks in matrix.values()
+            for track_id in user_tracks.keys()
+        })
+
+        def build_vector(user_id: str) -> list:
+            return [
+                matrix[user_id].get(track_id, 0)
+                for track_id in all_tracks
+            ]
+
+        def custom_cosine_similarity(vector_a: list, vector_b: list) -> float:
+            dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+            norm_a = math.sqrt(sum(a * a for a in vector_a))
+            norm_b = math.sqrt(sum(b * b for b in vector_b))
+
+            if norm_a == 0 or norm_b == 0:
+                return 0.0
+
+            return dot_product / (norm_a * norm_b)
+
+        user_vectors = {
+            user_id: build_vector(user_id)
+            for user_id in users
+        }
+
+        recommendations = {}
+
+        for user_id in users:
+            listened_tracks = set(matrix[user_id].keys())
+            similarities = []
+
+            for other_user_id in users:
+                if other_user_id == user_id:
+                    continue
+
+                similarity_score = custom_cosine_similarity(
+                    user_vectors[user_id],
+                    user_vectors[other_user_id]
+                )
+
+                similarities.append((other_user_id, similarity_score))
+
+            similarities.sort(key=lambda item: item[1], reverse=True)
+
+            top_neighbors = similarities[:5]
+            candidate_scores = defaultdict(float)
+
+            for neighbor_id, similarity_score in top_neighbors:
+                if similarity_score <= 0:
+                    continue
+
+                for track_id, play_count in matrix[neighbor_id].items():
+                    if track_id not in listened_tracks:
+                        candidate_scores[track_id] += similarity_score * play_count
+
+            top_recommendations = sorted(
+                candidate_scores.items(),
+                key=lambda item: item[1],
+                reverse=True
+            )[:TOP_N_RECO]
+
+            recommendations[user_id] = [
+                {
+                    "track_id": track_id,
+                    "score": round(score, 4)
+                }
+                for track_id, score in top_recommendations
+            ]
+
+        print(f"Recommandations générées pour {len(recommendations)} utilisateurs.")
+
+        return recommendations
+    
     @task(task_id="store_recommendations")
     def store_recommendations(recommendations: dict, **context) -> dict:
         """
         Stocke les recommandations dans Redis et PostgreSQL.
-
-        TODO :
-            1. Redis : pour chaque user_id :
-               redis.setex(f'reco:{user_id}', RECO_TTL_SECONDS, json.dumps(track_ids))
-            2. PostgreSQL : UPSERT dans recommendations
-               INSERT INTO recommendations (user_id, track_id, score, generated_at)
-               VALUES ... ON CONFLICT (user_id, track_id) DO UPDATE SET score=..., generated_at=NOW()
-            3. Retourner {"users_with_recos": N, "total_recommendations": M}
         """
-        raise NotImplementedError("TODO : implémenter store_recommendations()")
+
+        if not recommendations:
+            return {
+                "users_with_recos": 0,
+                "total_recommendations": 0
+            }
+
+        redis_client = redis.Redis.from_url(
+            REDIS_URL,
+            decode_responses=True
+        )
+
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+
+        rows_to_insert = []
+        total_recommendations = 0
+
+        for user_id, recos in recommendations.items():
+
+            track_ids = [
+                reco["track_id"]
+                for reco in recos
+            ]
+
+            redis_client.setex(
+                f"reco:{user_id}",
+                RECO_TTL_SECONDS,
+                json.dumps(track_ids)
+            )
+
+            for reco in recos:
+                rows_to_insert.append(
+                    (
+                        user_id,
+                        reco["track_id"],
+                        reco["score"]
+                    )
+                )
+
+            total_recommendations += len(recos)
+
+        if rows_to_insert:
+
+            sql = """
+                INSERT INTO recommendations
+                (
+                    user_id,
+                    track_id,
+                    score,
+                    generated_at
+                )
+                VALUES
+                (
+                    %s,
+                    %s,
+                    %s,
+                    NOW()
+                )
+                ON CONFLICT (user_id, track_id)
+                DO UPDATE SET
+                    score = EXCLUDED.score,
+                    generated_at = NOW()
+            """
+
+            conn = hook.get_conn()
+            cursor = conn.cursor()
+
+            cursor.executemany(
+                sql,
+                rows_to_insert
+            )
+
+            conn.commit()
+
+            cursor.close()
+            conn.close()
+
+        print(
+            f"{len(recommendations)} utilisateurs "
+            f"avec recommandations."
+        )
+
+        print(
+            f"{total_recommendations} recommandations stockées."
+        )
+
+        return {
+            "users_with_recos": len(recommendations),
+            "total_recommendations": total_recommendations
+        }
 
     # ── Orchestration ─────────────────────────────────────────
     matrix        = build_user_track_matrix()

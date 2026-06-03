@@ -11,23 +11,23 @@
 Outil recommandé : draw.io, Excalidraw, ou Mermaid (ci-dessous)
 ```
 
+
 ```mermaid
 graph TD
-    SIM[Simulateur P2P] -->|pub/sub| REDIS[(Redis)]
-    SIM -->|produce| KAFKA[Apache Kafka]
-    
-    REDIS -->|consume| AIR[Airflow DAGs]
-    KAFKA -->|consume| SPARK[Spark Streaming]
-    KAFKA -->|availableNow| AIR
-    
-    AIR -->|upsert| PG[(PostgreSQL)]
-    AIR -->|write| MINIO[(MinIO / Parquet)]
-    AIR -->|cache| REDIS
-    
-    SPARK -->|write| PG
-    SPARK -->|checkpoint| MINIO
-    SPARK -->|cache| REDIS
-    SPARK -->|produce| KAFKA
+    SIM[Simulateur P2P] -->|events batch + pseudo-stream| AIR[Airflow DAGs]
+    SIM -->|write raw data| MINIO[(MinIO / Data Lake)]
+
+    AIR -->|ETL orchestration| PG[(PostgreSQL)]
+    AIR -->|store raw + processed data| MINIO
+    AIR -->|cache / intermediate state| REDIS[(Redis)]
+
+    REDIS -->|queue Celery| AIR
+
+    %% Future extensions (désactivées actuellement)
+    KAFKA[Kafka - Future Streaming Layer] -.-> SIM
+    KAFKA -.-> SPARK[Spark Streaming - Future Processing]
+    SPARK -.-> PG
+    SPARK -.-> MINIO
 ```
 
 ---
@@ -38,10 +38,10 @@ graph TD
 
 | Pipeline | Approche | Justification |
 |----------|----------|---------------|
-| catalog_ingestion | ETL | ... |
-| streaming_events | ... | ... |
-| aggregation | ... | ... |
-| streaming_trends (Spark) | ... | ... |
+| catalog_ingestion | ETL | Transformation des données avant stockage pour garantir qualité et cohérence du catalogue musical |
+| streaming_events | ELT (future) | Ingestion brute dans Kafka puis traitement différé pour analyse temps réel |
+| aggregation | ETL | Calcul de KPIs (écoutes, utilisateurs actifs) dans Airflow avant stockage PostgreSQL |
+| streaming_trends (Spark) | ELT | Traitement distribué des événements en quasi temps réel pour détecter tendances |
 
 ### Partitionnement Parquet
 
@@ -56,19 +56,41 @@ spotify-parquet/
 ```
 
 **Pourquoi cette structure ?**
-→ À compléter
+→ Le partitionnement est réalisé par :
+
+* date ;
+* heure.
+
+Cette stratégie permet :
+
+* d'éviter le scan complet des données ;
+* d'améliorer les performances des requêtes analytiques ;
+* de faciliter les traitements incrémentaux ;
+* de réduire les coûts de lecture des fichiers Parquet.
+
+Exemple :
+
+Une analyse portant uniquement sur les écoutes du 15 janvier à 14h ne lira que la partition correspondante.
+ 
 
 ### Topics Kafka — Stratégie de partitionnement
 
 | Topic | Partitions | Clé | Justification |
 |-------|-----------|-----|---------------|
-| listening_events | 6 | user_id | ... |
-| p2p_network_events | 6 | peer_id | ... |
-| catalog_updates | 3 | track_id | ... |
-| fraud_alerts | 3 | user_id | ... |
+| listening_events | 6 | user_id | Garantit l’ordre des événements d’un même utilisateur. |
+| p2p_network_events | 6 | peer_id | Tous les événements d’un même pair arrivent sur la même partition. |
+| catalog_updates | 3 | track_id | Garantit la cohérence des mises à jour du catalogue. |
+| fraud_alerts | 3 | user_id | Facilite le suivi des comportements suspects d’un utilisateur. |
 
 **Pourquoi `user_id` comme clé pour `listening_events` ?**
-→ À compléter
+→ Kafka garantit l'ordre uniquement à l'intérieur d'une partition.
+
+En utilisant `user_id` comme clé :
+
+* toutes les écoutes d'un utilisateur sont envoyées dans la même partition ;
+* l'ordre chronologique des événements est conservé ;
+* Spark peut reconstruire correctement le comportement utilisateur ;
+* les calculs d'agrégation deviennent plus simples.
 
 ---
 
@@ -76,11 +98,50 @@ spotify-parquet/
 
 ### Pourquoi CeleryExecutor (pas KubernetesExecutor) ?
 
-→ À compléter
+→ Le projet est exécuté dans un environnement Docker Compose local.
+
+CeleryExecutor présente plusieurs avantages :
+
+* plus simple à configurer ;
+* compatible avec Redis déjà utilisé comme broker ;
+* adapté aux besoins du projet ;
+* consommation de ressources plus faible ;
+* déploiement rapide pour un projet académique.
+
+KubernetesExecutor aurait nécessité :
+
+* un cluster Kubernetes ;
+* davantage de configuration ;
+* une infrastructure plus complexe à maintenir.
+
+Pour un projet pédagogique, CeleryExecutor offre le meilleur compromis entre simplicité et scalabilité.
+
 
 ### Gestion des secrets
 
-→ Comment votre groupe gère les credentials (PostgreSQL password, MinIO keys...) ?
+→ Les credentials sont centralisés dans les variables d'environnement Docker Compose.
+Exemples :
+
+```yaml
+POSTGRES_USER=airflow
+POSTGRES_PASSWORD=airflow
+
+MINIO_ROOT_USER=minioadmin
+MINIO_ROOT_PASSWORD=minioadmin
+```
+
+Dans un environnement de production, ces secrets devraient être stockés dans :
+
+* Docker Secrets ;
+* HashiCorp Vault ;
+* AWS Secrets Manager ;
+* Azure Key Vault.
+
+Cette approche permet :
+
+* d'éviter les mots de passe en dur dans le code ;
+* de simplifier la rotation des secrets ;
+* d'améliorer la sécurité globale.
 
 ---
 
@@ -93,10 +154,33 @@ Serving layer: PostgreSQL + Redis ← consommé par les clients
 ```
 
 **Ce qui est en batch et pourquoi :**
-→ À compléter
+→ Traitements batch :
+
+* agrégations journalières ;
+* statistiques historiques ;
+* génération des datasets analytiques ;
+* export Parquet.
+
+Le batch est utilisé lorsque :
+
+* une faible latence n'est pas nécessaire ;
+* les calculs sont coûteux ;
+* les données sont analysées sur de longues périodes.
+
 
 **Ce qui est en streaming et pourquoi :**
-→ À compléter
+→ Traitements streaming :
+
+* tendances musicales en temps réel ;
+* détection de fraude ;
+* monitoring du réseau P2P ;
+* métriques de consommation instantanées.
+
+Le streaming est utilisé lorsque :
+
+* les résultats doivent être disponibles immédiatement ;
+* la réactivité métier est importante ;
+* les événements arrivent en continu.
 
 ---
 
