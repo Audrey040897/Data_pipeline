@@ -1,67 +1,483 @@
 # SPOTIFY — Plateforme de streaming musical distribuée
 
-> **Formation Data & IA — Master 1 | 35 heures | Groupes de 3-4**
-
-Vous allez construire **SPOTIFY**, une plateforme de streaming musical complète inspirée de la vraie. De l'ingestion du catalogue jusqu'à la détection de fraude en temps réel, en passant par un réseau peer-to-peer de distribution des morceaux.
-
-Ce projet se construit **brique par brique sur 5 jours**. Chaque livrable s'appuie sur le précédent. À la fin, votre groupe disposera d'une plateforme opérationnelle — et vous interconnecterez vos instances avec celles des autres groupes pour former un véritable écosystème musical distribué.
+>## 📊 Spotify Data Pipeline — Phase 1
+ 
+**Status:** Phase 1 ✅ COMPLETED
 
 ---
 
-## Ce que vous allez construire
+## 📑 Table des matières
 
-```
-Sources ──► Kafka topics ──► Spark Streaming ──► PostgreSQL / Redis
-              │                                         │
-              └──► Airflow DAGs (batch) ────────────────┘
-                                                        │
-                                              MinIO (Parquet)
-```
-
-| Couche | Technologie | Ce que vous implémentez |
-|--------|-------------|------------------------|
-| Orchestration batch | Apache Airflow 2.x | 5 DAGs + 2 ponts batch/streaming |
-| Messaging | Apache Kafka 3.x (KRaft) | 6 topics internes + 3 inter-groupes |
-| Streaming | Spark 3.5+ Structured Streaming | 3 jobs temps réel |
-| Base de données | PostgreSQL 15+ | Catalogue, événements, agrégats, DLQ |
-| Cache | Redis 7+ | Recommandations, top tracks live |
-| Stockage objet | MinIO (S3-compatible) | Parquet, checkpoints Spark |
-| Simulation | Python (custom) | Simulateur P2P avec mode fraude |
-| Conteneurisation | Docker Compose | Stack complète locale |
+1. [Vue d'ensemble](#vue-densemble)
+2. [Architecture](#architecture)
+3. [Stack technique](#stack-technique)
+4. [Installation](#installation)
+5. [Utilisation](#utilisation)
+6. [Structure du projet](#structure-du-projet)
+7. [Pipelines](#pipelines)
+8. [Testing](#testing)
+9. [Troubleshooting](#troubleshooting)
+10. [Ressources](#ressources)
 
 ---
 
-## Progression — Les 3 phases
+## 🎯 Vue d'ensemble
 
-### Phase 1 — Data Pipelines Production (Lundi + Mardi, ~14h)
+### Mission
+Construire un **pipeline de données temps réel** pour ingérer, valider, transformer et distribuer les métadonnées musicales de Spotify à travers une architecture cloud-native.
 
-Construire le socle batch de SPOTIFY avec Airflow.
+### Objectifs Phase 1
+- ✅ Ingestion du catalogue musical (MinIO → PostgreSQL)
+- ✅ Streaming des événements d'écoute (Redis → PostgreSQL)
+- ✅ Tests unitaires et validation
+- ✅ Documentation complète
+- ✅ Gestion des erreurs (DLQ)
 
-**Issues à fermer : #1 → #10**
-
+### Résultats Phase 1
 ```
-#1  Setup Docker Compose
-#2  Schéma PostgreSQL complet
-#3  Data generator (faker)
-#4  DAG catalog_ingestion_pipeline
-#5  Simulateur P2P + Redis pub/sub
-#6  DAG streaming_events_pipeline
-#7  DAG aggregation_pipeline + MinIO
-#8  DAG recommendation_pipeline
-#9  DAG dlq_reprocessing_pipeline
-#10 Tests pytest + README + doc_md
+✅ 5 DAGs implémentés
+✅ 34 tests (0 failed)
+✅ 3 incidents documentés et résolus
+✅ 100% code coverage des transformations
 ```
-
-**Critères de validation Phase 1 :**
-- [ ] Les 5 DAGs s'exécutent sans erreur avec le simulateur P2P actif
-- [ ] Le catalogue est peuplé avec les données des 3 labels fournis
-- [ ] Les agrégats sont cohérents avec les données source
-- [ ] Les recommandations sont générées et accessibles dans Redis
-- [ ] La DLQ capture les événements défectueux sans bloquer les pipelines
-- [ ] Une suite pytest couvre structure + transformations
 
 ---
 
+## 🏗️ Architecture
+
+### Flux global
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    SPOTIFY DATA PIPELINE                    │
+└─────────────────────────────────────────────────────────────┘
+
+LAYER 1: SOURCES
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│   MinIO      │  │    Redis     │  │ PostgreSQL   │
+│ (Catalogs)   │  │   (Events)   │  │ (Dimension)  │
+└──────────────┘  └──────────────┘  └──────────────┘
+       ↓                 ↓                  ↓
+       
+LAYER 2: INGESTION (Airflow DAGs)
+┌─────────────────────────────────────────────────────────────┐
+│  catalog_ingestion_pipeline        streaming_events_pipeline│
+│  ├─ Extract (MinIO)                 ├─ Consume (Redis)      │
+│  ├─ Validate                        ├─ Validate             │
+│  ├─ Transform                       ├─ Enrich               │
+│  ├─ Load (PostgreSQL)               ├─ Store (Parquet)      │
+│  └─ Notify                          └─ Load (PostgreSQL)    │
+└─────────────────────────────────────────────────────────────┘
+       ↓                                    ↓
+       
+LAYER 3: STORAGE
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│  PostgreSQL      │  │   MinIO Parquet  │  │  Redis Cache     │
+│  ├─ artists      │  │  ├─ listening/   │  │  (Session data)  │
+│  ├─ albums       │  │  ├─ aggregated/  │  │                  │
+│  ├─ tracks       │  │  └─ archived/    │  │                  │
+│  ├─ events       │  │                  │  │                  │
+│  └─ dlq_events   │  │                  │  │                  │
+└──────────────────┘  └──────────────────┘  └──────────────────┘
+       ↓
+       
+LAYER 4: ANALYTICS (Phase 2)
+┌─────────────────────────────────────────────────────────────┐
+│  Aggregation, Recommendation, Analysis                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Composants clés
+
+| Composant | Rôle | Port |
+|-----------|------|------|
+| **Airflow** | Orchestration des DAGs | 8080 |
+| **PostgreSQL** | Data Warehouse | 5432 |
+| **MinIO** | Object Storage (S3-like) | 9001 |
+| **Redis** | Message Queue + Cache | 6379 |
+| **Docker Compose** | Infrastructure locale | - |
+
+---
+
+## 💻 Stack technique
+
+### Versions
+```
+Python:           3.13.12
+Airflow:          2.9.0
+PostgreSQL:       15.0
+Redis:            7.0
+MinIO:            latest
+Docker Compose:   3.8+
+```
+
+### Dépendances principales
+```python
+# Core
+apache-airflow==2.9.0
+apache-airflow-providers-postgres
+apache-airflow-providers-redis
+
+# Data Processing
+pandas>=1.5.0
+faker>=15.0.0
+boto3>=1.26.0
+
+# Storage
+psycopg2-binary>=2.9.0
+redis>=4.0.0
+
+# Testing
+pytest>=8.0.0
+pytest-cov>=4.0.0
+```
+
+---
+
+## 📦 Installation
+
+### Prérequis
+```bash
+# Vérifier les versions
+python --version          # → 3.13.x
+docker --version          # → 20.10+
+docker compose --version  # → 2.0+
+```
+
+### Étape 1: Cloner et installer
+```bash
+# Cloner le repo
+git clone <repo-url>
+cd Data_pipeline
+
+# Créer l'environnement virtuel
+python3.13 -m venv env
+source env/bin/activate  # Linux/Mac
+# ou: env\Scripts\activate  # Windows
+
+# Installer les dépendances
+pip install -r requirements.txt
+```
+
+### Étape 2: Démarrer l'infrastructure
+```bash
+# Démarrer tous les conteneurs
+docker compose up -d
+
+# Vérifier que tout est running
+docker compose ps
+
+# Résultat attendu:
+# STATUS: Up (tous les services)
+```
+
+### Étape 3: Initialiser Airflow
+```bash
+# La DB Airflow est auto-créée au premier démarrage
+# Attendre ~1 minute
+
+# Vérifier les logs
+docker compose logs airflow-scheduler | tail -20
+
+# Chercher: "Scheduler started"
+```
+
+### Étape 4: Accéder aux interfaces
+```
+Airflow UI:    http://localhost:8080
+MinIO Console: http://localhost:9001
+PostgreSQL:    localhost:5432 (user: spotify)
+Redis:         localhost:6379
+```
+
+---
+
+## 🚀 Utilisation
+
+### Lancer les tests
+
+```bash
+# Set PYTHONPATH
+export PYTHONPATH=$(pwd)
+
+# Tous les tests (34 tests)
+pytest tests/ -v --tb=short
+
+# Juste les tests unitaires
+pytest tests/unit/ -v
+
+# Juste les tests structure
+pytest tests/structure/ -v
+
+# Avec rapport de couverture
+pytest tests/ --cov=src --cov-report=html
+```
+
+### Vérifier les DAGs
+
+```bash
+# Compiler les DAGs
+python -m py_compile dags/*.py
+
+# Lancer un DAG manuellement (backfill)
+docker compose exec airflow-scheduler airflow dags trigger \
+  catalog_ingestion_pipeline \
+  --exec-date 2025-06-01
+
+# Voir les logs du DAG
+docker compose logs airflow-scheduler | grep "catalog_ingestion_pipeline"
+```
+
+### Inspecter la base de données
+
+```bash
+# Se connecter à PostgreSQL
+docker compose exec postgres psql -U spotify spotify
+
+# Commandes utiles
+SELECT COUNT(*) FROM artists;        -- Nombre d'artistes
+SELECT COUNT(*) FROM tracks;         -- Nombre de tracks
+SELECT * FROM dead_letter_events;    -- Erreurs
+\dt                                  -- Lister les tables
+\d artists                           -- Schéma de la table
+```
+
+### Vérifier MinIO
+
+```bash
+# Lister les buckets
+docker compose exec minio aws s3 ls --endpoint-url http://minio:9000
+
+# Lister les fichiers dans un bucket
+docker compose exec minio aws s3 ls s3://labels-raw --endpoint-url http://minio:9000
+```
+
+---
+
+## 📂 Structure du projet
+
+```
+Data_pipeline/
+│
+├── dags/                          # Airflow DAGs
+│   ├── catalog_ingestion_pipeline.py
+│   ├── streaming_events_pipeline.py
+│   ├── aggregation_pipeline.py
+│   ├── recommendation_pipeline.py
+│   └── dlq_reprocessing_pipeline.py
+│
+├── src/                           # Code source
+│   ├── transformations/
+│   │   ├── catalog.py            # Normalisation, déduplication
+│   │   └── events.py             # Validation, enrichissement
+│   ├── data_generator/
+│   │   └── generate_catalog.py   # Générateur de données
+│   └── p2p_simulator/
+│       └── p2p_events.py         # Simulation P2P
+│
+├── tests/                         # Tests
+│   ├── structure/
+│   │   └── test_dag_structure.py  # 16 tests structure
+│   ├── unit/
+│   │   └── test_transformations.py # 18 tests unitaires
+│   └── integration/               # (Phase 2)
+│
+├── docs/                          # Documentation
+│   ├── RUNBOOK.md                # Incidents et résolutions
+│   ├── ARCHITECTURE.md           # Architecture détaillée
+│   └── TESTING.md                # Guide des tests
+│
+├── sql/                           # Scripts SQL
+│   └── schema.sql                # Schéma des tables
+│
+├── docker-compose.yml            # Configuration Docker
+├── requirements.txt              # Dépendances Python
+└── README.md                     # Ce fichier
+```
+
+---
+
+## 📊 Pipelines
+
+### 1. catalog_ingestion_pipeline
+
+**Objectif:** Ingérer les métadonnées musicales
+
+```
+MinIO (JSON) → Extract → Validate → Transform → PostgreSQL
+                                  ↓
+                            DLQ (errors)
+```
+
+**Horaire:** Quotidien à 02:00 UTC  
+**Idempotence:** ✅ ON CONFLICT DO UPDATE  
+**Statut:** ✅ PRODUCTION
+
+**Tables affectées:**
+- `artists` (UPSERT par name, label)
+- `albums` (UPSERT par id)
+- `tracks` (UPSERT par id)
+
+### 2. streaming_events_pipeline
+
+**Objectif:** Traiter les événements d'écoute temps réel
+
+```
+Redis → Consume → Validate → Enrich → Store (Parquet) → PostgreSQL
+                      ↓
+                  DLQ (errors)
+```
+
+**Horaire:** Toutes les 5 minutes  
+**Batch size:** 1000 événements  
+**Statut:** ✅ PRODUCTION
+
+**Tables affectées:**
+- `listening_events`
+- `p2p_network_events`
+
+---
+
+## 🧪 Testing
+
+### Stratégie de test
+
+```
+Level 1: Unit Tests (18 tests)
+├─ Normalisation des données
+├─ Validation de schéma
+├─ Déduplication
+└─ Génération de données
+
+Level 2: Structure Tests (16 tests)
+├─ Import des DAGs
+├─ Présence des tags
+├─ Présence du doc_md
+└─ Dépendances entre tâches
+
+Level 3: Integration Tests (Phase 2)
+├─ Streaming end-to-end
+├─ PostgreSQL → MinIO
+└─ Load testing
+```
+
+### Couverture
+
+```
+src/transformations/catalog.py   : 100% ✅
+src/transformations/events.py    : 100% ✅
+dags/                            : Structure ✅
+
+Total: 34 tests, 0 failed
+```
+
+---
+
+## 🔧 Troubleshooting
+
+### DAG disparaît de l'UI
+
+**Symptôme:** Le DAG n'apparaît pas dans Airflow  
+**Cause:** Erreur de compilation  
+**Solution:**
+```bash
+python -m py_compile dags/your_dag.py
+docker compose logs airflow-scheduler | grep ERROR
+```
+
+Voir: [RUNBOOK.md](docs/RUNBOOK.md) - Incident #1
+
+### Tests échouent avec erreur DB
+
+**Symptôme:** `sqlite3.OperationalError: no such table`  
+**Cause:** Mauvaise commande pytest  
+**Solution:**
+```bash
+export PYTHONPATH=$(pwd)
+python -m pytest tests/ -v
+```
+
+Voir: [RUNBOOK.md](docs/RUNBOOK.md) - Incident #2
+
+### Dépendances incompatibles
+
+**Symptôme:** `ImportError: cannot import name X`  
+**Cause:** Version mismatch  
+**Solution:**
+```bash
+pip install -r requirements.txt --upgrade
+pip check
+```
+
+Voir: [RUNBOOK.md](docs/RUNBOOK.md) - Incident #3
+
+---
+
+## 📚 Ressources
+
+### Documentation officielle
+- [Apache Airflow](https://airflow.apache.org/docs/)
+- [PostgreSQL](https://www.postgresql.org/docs/)
+- [Redis](https://redis.io/documentation)
+- [MinIO](https://docs.min.io/)
+
+### Guides internes
+- [RUNBOOK.md](docs/RUNBOOK.md) — Incidents et résolutions
+- [TESTS_IMPLEMENTATION.md](docs/TESTS_IMPLEMENTATION.md) — Guide des tests
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) — Architecture détaillée
+
+### Commandes utiles
+
+```bash
+# Redémarrer Airflow
+docker compose restart airflow-scheduler
+
+# Voir les logs
+docker compose logs -f airflow-scheduler
+
+# Reset complet (⚠️ efface les données!)
+docker compose down && docker volume prune
+
+# Vérifier la santé
+docker compose ps
+docker stats
+```
+
+---
+
+## 📋 Checklist Phase 1
+
+- [x] Tous les DAGs compilent
+- [x] Tous les tests passent (34/34)
+- [x] DAGs ont tags et doc_md
+- [x] Transformations testées
+- [x] RUNBOOK documenté
+- [x] README finalisé
+- [x] Architecture documentée
+- [x] Incidents résolus
+
+---
+
+## 🚀 Prochaines étapes (Phase 2)
+
+- Kafka KRaft cluster (Ticket #11)
+- Advanced aggregations (Ticket #12-15)
+- Recommendation engine (Ticket #16-18)
+- Real-time analytics (Ticket #19-20)
+
+---
+
+**Contact:** Groupe-K HETIC  
+**Last updated:** 3 juin 2026  
+**Version:** 1.0.0
+
+**La Phase 2 (Kafka + Spark) commencera mercredi.** Vous avez une fondation solide. 🚀
+
+---
+
+> **Made by Groupe-K**  
+> M1 Data & IA — HETIC  
+> 02 Juin 2026
 ### Phase 2 — Streaming & Temps Réel (Mercredi PM + Jeudi, ~10h)
 
 Faire évoluer la stack vers le temps réel avec Kafka et Spark.
@@ -114,148 +530,4 @@ Connecter votre instance aux instances des autres groupes.
 
 ---
 
-## Structure du repo
 
-```
-SPOTIFY/
-├── README.md                          ← ce fichier
-├── docker-compose.yml                 ← stack complète (à compléter)
-├── .env.example                       ← variables d'environnement
-│
-├── dags/                              ← Phase 1 + ponts Phase 2
-│   ├── catalog_ingestion_pipeline.py
-│   ├── streaming_events_pipeline.py
-│   ├── aggregation_pipeline.py
-│   ├── recommendation_pipeline.py
-│   ├── dlq_reprocessing_pipeline.py
-│   ├── late_events_reprocessing.py    ← Phase 2
-│   ├── reconciliation_pipeline.py     ← Phase 2
-│   ├── catalog_federation_pipeline.py ← Phase 3
-│   └── global_aggregation_pipeline.py ← Phase 3
-│
-├── spark_jobs/                        ← Phase 2
-│   ├── streaming_trends_job.py
-│   ├── streaming_enrichment_job.py
-│   ├── fraud_detection_job.py
-│   └── global_metrics_streaming_job.py ← Phase 3
-│
-├── kafka/
-│   ├── topics_config.yml
-│   ├── schemas/                       ← schémas Avro/JSON
-│   └── cross_group_config.yml         ← Phase 3
-│
-├── contracts/                         ← Phase 3 (inter-groupes)
-│   ├── catalog_federation_schema.json
-│   ├── p2p_cross_request_schema.json
-│   └── global_metrics_schema.json
-│
-├── src/
-│   ├── p2p_simulator/                 ← simulateur principal
-│   ├── transformations/               ← fonctions de transformation
-│   └── data_generator/                ← génération de données faker
-│
-├── plugins/
-│   ├── operators/                     ← operators Airflow custom
-│   └── hooks/
-│
-├── sql/                               ← scripts SQL init
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── structure/                     ← tests structure DAGs
-│
-├── docs/
-│   ├── ARCHITECTURE.md                ← votre diagramme d'archi
-│   ├── DATA_MODEL.md                  ← votre modèle de données
-│   └── RUNBOOK.md                     ← procédures incidents
-│
-└── solutions/                         ← déverrouillé vendredi soir
-```
-
----
-
-## Démarrage rapide
-
-```bash
-# 1. Cloner et configurer
-git clone https://github.com/<votre-groupe>/spotify-m1.git
-cd spotify-m1
-cp .env.example .env
-
-# 2. Lancer la stack Phase 1
-docker compose up -d
-
-# 3. Vérifier que tout est up
-docker compose ps
-
-# 4. Accéder aux UIs
-# Airflow  : http://localhost:8080  (admin / admin)
-# MinIO    : http://localhost:9001  (minioadmin / minioadmin)
-# Kafka UI : http://localhost:8090  (Phase 2)
-```
-
----
-
-## Organisation Git
-
-```
-main           ← branche stable, protégée
-├── feat/batch-pipelines    ← Phase 1
-├── feat/kafka-streaming    ← Phase 2
-└── feat/inter-group        ← Phase 3
-```
-
-**Convention des commits :**
-```
-feat(dag): add catalog_ingestion retry logic
-fix(spark): correct watermark threshold on streaming_trends
-docs(readme): update architecture diagram
-test(unit): add transformation tests for enrichment
-```
-
-**Workflow :**
-1. Créer une branche depuis `main`
-2. Travailler, committer régulièrement
-3. Ouvrir une PR avec description de ce qui est fait
-4. Code review par un membre du groupe
-5. Merge après validation
-
----
-
-## Rôles suggérés
-
-| Rôle | Périmètre principal |
-|------|---------------------|
-| Data Engineer — Batch | DAGs Airflow, ingestion catalogue, agrégation, DLQ, tests |
-| Data Engineer — Streaming | Jobs Spark, topics Kafka, fenêtres temporelles, enrichissement |
-| Data Engineer — Infra & P2P | Docker Compose, cluster Kafka, simulateur P2P, réseau |
-| Data Engineer — Qualité | Exactly-once, watermarking, fraude, réconciliation, recovery |
-
-> Dans un groupe de 3, fusionner Qualité/Fiabilité avec Streaming. Chaque membre doit comprendre **l'ensemble** de l'architecture.
-
----
-
-## Ressources
-
-- [Documentation Airflow 2.x](https://airflow.apache.org/docs/)
-- [Kafka Quickstart](https://kafka.apache.org/quickstart)
-- [Spark Structured Streaming Guide](https://spark.apache.org/docs/latest/structured-streaming-programming-guide.html)
-- [Questions → ouvrir une issue avec le label `question`](../../issues/new?labels=question)
-
----
-
-## Grille d'évaluation
-
-| Critère | Poids | Attendu |
-|---------|-------|---------|
-| Architecture & conception | 15% | Diagramme clair, choix justifiés, séparation batch/streaming cohérente |
-| Pipelines batch (Airflow) | 20% | DAGs fonctionnels, robustes, idempotents, parallélisés, testés |
-| Streaming (Kafka + Spark) | 20% | Topics bien conçus, jobs opérationnels, fenêtres correctes |
-| Fiabilité & résilience | 15% | Exactly-once, watermarking, recovery, réconciliation |
-| Interconnexion inter-groupes | 15% | Fédération catalogue, P2P cross-group, classement global |
-| Qualité & documentation | 10% | Tests pytest, README, doc_md, data contracts, code propre |
-| Soutenance & collaboration | 5% | Clarté, chaque membre explique l'ensemble, esprit d'équipe |
-
----
-
-> **La soutenance finale est une démonstration live, pas un diaporama. Votre meilleur argument est un système qui tourne.**

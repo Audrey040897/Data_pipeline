@@ -19,6 +19,40 @@ import random
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List
+from typing import Optional
+
+import redis
+
+# Phase 2 — décommenter quand Kafka est prêt
+from confluent_kafka import Producer
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s"
+)
+logger = logging.getLogger("p2p_simulator")
+
+
+# ─────────────────────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────────────────────
+
+REDIS_URL = "redis://localhost:6379/1"
+KAFKA_BOOTSTRAP = "localhost:9092"
+
+TOPICS = {
+    "listening":   "listening_events",
+    "p2p_network": "p2p_network_events",
+}
+
+DEVICE_TYPES = ["mobile", "desktop", "smart_speaker", "web", "tv"]
+GEO_COUNTRIES = ["FR", "DE", "US", "GB", "ES", "IT", "BR", "JP", "KR", "AU"]
+EVENT_SOURCES = ["p2p", "p2p", "p2p", "direct", "cache"]  # pondéré : 60% P2P
+
+
+# ─────────────────────────────────────────────────────────────
+# DONNÉES SIMULÉES
+# ─────────────────────────────────────────────────────────────
 
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
@@ -30,6 +64,61 @@ class P2PSimulator:
     """
 
     def __init__(self, peers: int = 10, rate: int = 3, use_kafka: bool = True):
+    def __init__(
+        self,
+        n_peers: int = 10,
+        events_per_second: float = 5.0,
+        mode: str = "normal",
+    ):
+        self.n_peers = n_peers
+        self.events_per_second = events_per_second
+        self.mode = mode
+        self.running = True
+        self.event_count = 0
+        self.active_peers = [str(uuid.uuid4()) for _ in range(n_peers)]
+
+        # Connexion Redis
+        self.redis = redis.from_url(REDIS_URL, decode_responses=True)
+
+        # Phase 2 — Kafka producer
+        self.kafka_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP, 'acks': 'all', 'enable.idempotence': True})
+
+        # Peers actifs simulés
+        self.active_peers = [str(uuid.uuid4()) for _ in range(n_peers)]
+
+        signal.signal(signal.SIGTERM, self._shutdown)
+        signal.signal(signal.SIGINT, self._shutdown)
+
+        logger.info(f"Simulateur démarré | mode={mode} | peers={n_peers} | rate={events_per_second} evt/s")
+
+    def run(self):
+        """Boucle principale : génère et publie des événements en continu."""
+        interval = 1.0 / self.events_per_second
+
+        while self.running:
+            try:
+                # Alterner listening et réseau P2P (80% / 20%)
+                if random.random() < 0.8:
+                    event = self._generate_listening_event()
+                    self._publish_event("listening", event)
+                else:
+                    event = self._generate_p2p_network_event()
+                    self._publish_event("p2p_network", event)
+
+                self.event_count += 1
+
+                if self.event_count % 100 == 0:
+                    logger.info(f"Événements publiés : {self.event_count}")
+
+                time.sleep(interval)
+
+            except Exception as e:
+                logger.error(f"Erreur lors de la génération d'événement : {e}")
+                time.sleep(1)
+
+    # ── Génération d'événements ──────────────────────────────
+
+    def _generate_listening_event(self) -> dict:
         """
         Args:
             peers: nombre de pairs P2P à simuler
@@ -94,45 +183,47 @@ class P2PSimulator:
             "event_source": "p2p",
         }
 
-    def _publish_to_kafka(self, event: Dict, topic: str = "listening_events"):
-        """
-        Publie l'événement sur Kafka avec gestion d'erreur.
-        
-        Le producteur est configuré avec idempotence, donc :
-            - Si le même message est envoyé deux fois, Kafka le déduplique
-            - Si une erreur réseau occur, le retry n'aura pas de doublon
-        """
-        try:
-            future = self.producer.send(topic, value=event)
-            
-            # Attendre la confirmation (synchrone pour exactly-once)
-            record_metadata = future.get(timeout=10)
-            
-            print(
-                f"✅ Event {event['event_id'][:8]}... publié sur "
-                f"{topic} (partition {record_metadata.partition}, offset {record_metadata.offset})"
-            )
-            
-            return True
-            
-        except KafkaError as e:
-            print(f"❌ Erreur Kafka : {e}")
-            # L'erreur est loggée, le retry automatique s'en charge
-            return False
+        if event_type == "chunk_transfer":
+            event["target_peer"]    = random.choice(self.active_peers)
+            event["chunk_size_kb"]  = random.randint(64, 512)
+            event["track_id"]       = random.choice(SAMPLE_TRACKS)["id"]
+        elif event_type in ("cache_hit", "cache_miss"):
+            event["track_id"]       = random.choice(SAMPLE_TRACKS)["id"]
+        elif event_type == "peer_connect":
+            event["geo_country"]    = random.choice(GEO_COUNTRIES)
 
-    def run(self, duration_seconds: int = 600):
-        """
-        Lance le simulateur et publie des événements en continu.
+        return event
+
+    # ── Publication ──────────────────────────────────────────
+
+    def _publish_event(self, topic_key: str, event: dict):
+        """Publie un événement dans Redis et (Phase 2) dans Kafka."""
+        payload = json.dumps(event)
+        channel = TOPICS[topic_key]
+
+        self._publish_to_redis(channel, payload)
+        # Phase 2 — décommenter
         
-        Args:
-            duration_seconds: durée de simulation (par défaut 10 min)
-        """
-        print(f"🚀 Simulateur P2P lancé (exactly-once mode)")
-        print(f"   - {self.peers} peers")
-        print(f"   - {self.rate} événements/sec")
-        print(f"   - Kafka idempotence : ON")
-        print(f"   - Duration : {duration_seconds}s")
-        print("-" * 60)
+        self._publish_to_kafka(channel, event.get("user_id", ""), payload)
+
+    def _publish_to_redis(self, channel: str, payload: str):
+        """Publie dans les listes Redis consommées par Airflow."""
+        try:
+            # On utilise le préfixe 'queue:' pour correspondre à ton DAG
+            queue_name = f"queue:{channel}"
+            self.redis.lpush(queue_name, payload)
+            # Optionnel : limiter la taille de la file pour éviter de saturer Redis
+            self.redis.ltrim(queue_name, 0, 9999)
+        except Exception as e:
+            logger.error(f"Erreur Redis sur {channel}: {e}")
+
+    def _publish_to_kafka(self, topic: str, key: str, payload: str):
+            def delivery_report(err, msg):
+                if err is not None:
+                    logger.error(f"Erreur Kafka: {err}")
+            
+            self.kafka_producer.produce(topic, key=key, value=payload, callback=delivery_report)
+            self.kafka_producer.poll(0)
 
         start_time = time.time()
         event_count = 0
