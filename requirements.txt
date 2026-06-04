@@ -24,7 +24,7 @@ confluent-kafka>=2.3.0
 kafka-python==2.0.2    # alternative plus simple
 
 # ── Spark (Phase 2 — installer via pip ou utiliser le container)
-# pyspark==3.5.0
+pyspark==3.5.0
 
 # ── Machine Learning (recommandations)
 scikit-learn==1.4.0
@@ -40,3 +40,4 @@ ruff==0.3.0
 pylint==3.1.0
 datetime 
 faker 
+
