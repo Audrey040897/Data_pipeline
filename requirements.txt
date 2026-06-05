@@ -15,6 +15,7 @@ pyarrow>=15.0.0        # lecture/écriture Parquet
 
 # ── Base de données
 psycopg2-binary>=2.9.9
+sqlalchemy
 
 # ── Redis
 redis==5.0.1

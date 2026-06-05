@@ -178,15 +178,15 @@ class P2PSimulator:
         }
 
         # Mode fraud (Phase 2) — décommenter
-        # if self.mode == "fraud" and random.random() < 0.3:
-        #     event["duration_ms"] = random.randint(100, 4999)
-        #     event["completed"] = False
+        if self.mode == "fraud" and random.random() < 0.3:
+            event["duration_ms"] = random.randint(100, 4999)
+            event["completed"] = False
 
         # Mode late_events (Phase 2) — décommenter
-        # if self.mode == "late_events" and random.random() < 0.4:
-        #     delay_minutes = random.randint(5, 30)
-        #     ts = datetime.utcnow() - timedelta(minutes=delay_minutes)
-        #     event["timestamp"] = ts.isoformat() + "Z"
+        if self.mode == "late_events" and random.random() < 0.4:
+            delay_minutes = random.randint(5, 30)
+            ts = datetime.utcnow() - timedelta(minutes=delay_minutes)
+            event["timestamp"] = ts.isoformat() + "Z"
 
         return event
 
