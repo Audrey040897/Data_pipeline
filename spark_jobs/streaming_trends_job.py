@@ -1,4 +1,6 @@
 import os
+import json
+from datetime import timedelta
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -12,6 +14,7 @@ from pyspark.sql.types import (
 
 KAFKA_BOOTSTRAP  = os.getenv("KAFKA_BOOTSTRAP",  "kafka-1:9092")
 KAFKA_TOPIC      = "listening_events"
+KAFKA_LATE_TOPIC = "late_listening_events"
 CHECKPOINT_PATH  = "s3a://spotify-checkpoints/streaming_trends"
 
 # ─────────────────────────────────────────────────────────────
@@ -38,13 +41,19 @@ LISTENING_EVENT_SCHEMA = StructType([
 def create_spark_session() -> SparkSession:
     """
     Configure la session avec les paramètres S3A requis pour MinIO (Issue #13).
+    Configure la session avec les paramètres S3A requis pour MinIO (Issue #13)
+    et les paramètres réseau pour la Spark UI.
     """
     return (
         SparkSession.builder
         .appName("SPOTIFY-streaming-trends")
         .config("spark.sql.shuffle.partitions", "6")
         .config("spark.streaming.stopGracefullyOnShutdown", "true")
-        # --- CONFIGURATION MINIO / S3A ---
+        # CONFIGURATION RÉSEAU (UI)
+        #.config("spark.ui.port", "4040")
+        #.config("spark.driver.bindAddress", "0.0.0.0")
+        #.config("spark.driver.host", "localhost")
+        # CONFIGURATION MINIO / S3A
         .config("spark.hadoop.fs.s3a.endpoint",             "http://minio:9000")
         .config("spark.hadoop.fs.s3a.access.key",           "minioadmin")
         .config("spark.hadoop.fs.s3a.secret.key",           "minioadmin")
@@ -56,12 +65,12 @@ def create_spark_session() -> SparkSession:
     )
 
 # ─────────────────────────────────────────────────────────────
-# LECTURE ET AFFICHAGE (Issue #13)
+# LECTURE ET TRAITEMENT (Issue #13 & #15)
 # ─────────────────────────────────────────────────────────────
 
 def read_kafka_stream(spark: SparkSession):
     """
-    Lecture Kafka avec isolation read_committed.
+    Lecture Kafka avec Watermark de 10 minutes (Issue #15).
     """
     raw_df = (
         spark.readStream
@@ -77,25 +86,63 @@ def read_kafka_stream(spark: SparkSession):
         F.from_json(F.col("value").cast("string"), LISTENING_EVENT_SCHEMA).alias("data")
     ).select("data.*")
 
-    # Conversion du timestamp pour l'affichage
+    # Ajout du Watermark de 10 min (Livrable Issue #15)
     return events_df.withColumn(
         "event_time", 
         F.to_timestamp(F.col("timestamp"))
-    )
+    ).withWatermark("event_time", "10 minutes")
+
+def route_late_events(batch_df, batch_id):
+    """
+    Routage des événements tardifs vers Kafka (Livrable Issue #15).
+    """
+    max_time_row = batch_df.select(F.max("event_time")).collect()
+    
+    if max_time_row and max_time_row[0][0]:
+        max_time = max_time_row[0][0]
+        threshold = max_time - timedelta(minutes=10)
+        
+        late_df = batch_df.filter(F.col("event_time") < threshold)
+        
+        if late_df.count() > 0:
+            try:
+                (late_df
+                 .select(F.to_json(F.struct("*")).alias("value"))
+                 .write
+                 .format("kafka")
+                 .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+                 .option("topic", KAFKA_LATE_TOPIC)
+                 .save())
+                
+                print(f"✅ BATCH {batch_id} : {late_df.count()} late events routés vers {KAFKA_LATE_TOPIC}")
+            except Exception as e:
+                print(f"❌ BATCH {batch_id} : Erreur lors du routage Kafka : {e}")
+        else:
+            print(f"ℹ️ BATCH {batch_id} : Pas d'événements en retard")
 
 def compute_top_tracks_tumbling(events_df):
     """
-    Issue #13 : Simple affichage console pour valider la lecture.
+    Validation Issue #15 : Affichage console ET routage via foreachBatch.
     """
-    return (
+    # 1. Affichage console pour validation visuelle (Critère Issue #15)
+    query_console = (
         events_df.writeStream
         .outputMode("append")
         .format("console")
         .option("truncate", "false")
-        .option("checkpointLocation", CHECKPOINT_PATH)
-        .trigger(processingTime="10 seconds")
+        .option("checkpointLocation", CHECKPOINT_PATH + "_console")
         .start()
     )
+
+    # 2. Routage vers Kafka topic 'late_listening_events' (Livrable Issue #15)
+    query_routing = (
+        events_df.writeStream
+        .foreachBatch(route_late_events)
+        .option("checkpointLocation", CHECKPOINT_PATH + "_routing")
+        .start()
+    )
+
+    return query_console
 
 # ─────────────────────────────────────────────────────────────
 # POINT D'ENTRÉE
@@ -106,7 +153,7 @@ def main():
     spark.sparkContext.setLogLevel("WARN")
 
     print("=" * 60)
-    print("🚀 Démarrage du job Spark (Issue #13 - Validation Lecture)")
+    print("🚀 Démarrage du job Spark (Watermarking & Routing - Issue #15)")
     print("=" * 60)
 
     try:
