@@ -40,6 +40,7 @@ LISTENING_EVENT_SCHEMA = StructType([
 
 def create_spark_session() -> SparkSession:
     """
+    Configure la session avec les paramètres S3A requis pour MinIO (Issue #13).
     Configure la session avec les paramètres S3A requis pour MinIO (Issue #13)
     et les paramètres réseau pour la Spark UI.
     """
